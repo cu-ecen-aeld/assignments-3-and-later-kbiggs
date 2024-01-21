@@ -19,4 +19,4 @@ fi
 
 # Find matching number of files and lines for searchstr
 # Echo out
-echo "The number of files are $(ls $filesdir -l | wc -l) and the number of matching lines are $(grep -r $searchstr $filesdir | wc -l)"
+echo "The number of files are $(ls $filesdir | wc -l) and the number of matching lines are $(grep -r $searchstr $filesdir | wc -l)"

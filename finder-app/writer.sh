@@ -12,6 +12,11 @@ if [ $# != 2 ]; then
 fi
 
 # Create new file at writefile path with content of writestr
+if [ ! -e $writefile ]; then
+	mkdir -p $(dirname $writefile)
+	touch $writefile
+fi
+
 echo $writestr > $writefile
 
 # Check if file was successfully created
