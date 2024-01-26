@@ -37,7 +37,7 @@ int main(int argc, char* argv[])
 	/* Log error if file couldn't be created */
 	if (fd == -1)
 	{
-		syslog(LOG_USER|LOG_ERR, "%s could not be created successfully", writefile);
+		syslog(LOG_USER|LOG_ERR, "%s could not be created/opened successfully", writefile);
 		return 1;
 	}
 
