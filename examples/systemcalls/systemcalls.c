@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -9,15 +14,16 @@
 */
 bool do_system(const char *cmd)
 {
-
 /*
  * TODO  add your code here
  *  Call the system() function with the command set in the cmd
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int sys_ret = system(cmd);
+    bool ret_val =  (sys_ret == -1) ? false : true;
 
-    return true;
+    return ret_val;
 }
 
 /**
@@ -45,19 +51,28 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
+    /* Call fork, returning false if there is an error in invocation */
+    pid_t pid = fork();    
+    if (pid == -1)
+    {
+        return false;
+    }
+
+    /* Call execv, returning false if there is an error */
+    int ret = execv(command[0], command);
+    if (ret == -1)
+    {
+        return false;
+    }
+
+    /* Call waitpid, returning false if there is an error */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, WNOHANG);
+    if (w_pid == -1)
+    {
+        return false;
+    }
 
     va_end(args);
 
@@ -80,9 +95,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
 
 /*
@@ -92,6 +104,40 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = open("redirection.txt", O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0 )
+    {
+        return false;
+    }
+
+    /* Call fork, returning false if there is an error in invocation */
+    pid_t pid = fork();    
+    if (pid == -1)
+    {
+        return false;
+    }
+
+    if (dup2(fd, 1) < 0)
+    {
+        return false;
+    }
+
+    close(fd);
+
+    /* Call execv, returning false if there is an error */
+    int ret = execv(command[0], command);
+    if (ret == -1)
+    {
+        return false;
+    }
+
+    /* Call waitpid, returning false if there is an error */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, WNOHANG);
+    if (w_pid == -1)
+    {
+        return false;
+    }
 
     va_end(args);
 
