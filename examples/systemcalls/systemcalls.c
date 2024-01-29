@@ -14,12 +14,6 @@
 */
 bool do_system(const char *cmd)
 {
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
     int sys_ret = system(cmd);
     bool ret_val =  (sys_ret == -1) ? false : true;
 
@@ -52,27 +46,45 @@ bool do_exec(int count, ...)
     }
     command[count] = NULL;
 
+    /* Confirm that path provided is absolute */
+    if (command[0][0] != '/')
+    {
+        return false;
+    }
+
     /* Call fork, returning false if there is an error in invocation */
     pid_t pid = fork();    
     if (pid == -1)
     {
         return false;
-    }
-
-    /* Call execv, returning false if there is an error */
-    int ret = execv(command[0], command);
-    if (ret == -1)
+    }    
+    /* If fork was successful, try calling execv */
+    else if (pid == 0)
     {
-        return false;
+        /* Child calls execv, returning false if there is an error */
+        int ret = execv(command[0], command);
+        if (ret == -1)
+        {
+            return false;
+        }
     }
-
-    /* Call waitpid, returning false if there is an error */
-    int status;
-    pid_t w_pid = waitpid(pid, &status, WNOHANG);
-    if (w_pid == -1)
+    else
     {
-        return false;
-    }
+        /* Call waitpid from parent, returning false if there is an error */
+        int status;
+        pid_t w_pid = waitpid(pid, &status, 0);
+        if (w_pid == -1)
+        {
+            return false;
+        }
+
+        /* If child terminated normally, and the exit status of
+           the child is non-zero, return false */
+        if (WIFEXITED(status) && WEXITSTATUS(status))
+        {
+            return false;
+        }
+    }       
 
     va_end(args);
 
@@ -96,16 +108,16 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     }
     command[count] = NULL;
 
+    /* Confirm that path provided is absolute */
+    if (command[0][0] != '/')
+    {
+        return false;
+    }
 
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
-    int fd = open("redirection.txt", O_WRONLY|O_TRUNC|O_CREAT, 0644);
-    if (fd < 0 )
+    /* Open file to redirect standard out */
+    /* Content inspired by https://stackoverflow.com/questions/13784269/redirection-inside-call-to-execvp-not-working/13784315#13784315 */
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0)
     {
         return false;
     }
@@ -115,29 +127,41 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     if (pid == -1)
     {
         return false;
-    }
-
-    if (dup2(fd, 1) < 0)
+    }    
+    /* If fork was successful, try calling execv */
+    else if (pid == 0)
     {
-        return false;
+        if (dup2(fd, 1) < 0)
+        {
+            return false;
+        }
+        /* Child calls execv, returning false if there is an error */
+        int ret = execv(command[0], command);
+        if (ret == -1)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        /* Call waitpid from parent, returning false if there is an error */
+        int status;
+        pid_t w_pid = waitpid(pid, &status, 0);
+        if (w_pid == -1)
+        {
+            return false;
+        }
+
+        /* If child terminated normally, and the exit status of
+           the child is non-zero, return false */
+        if (WIFEXITED(status) && WEXITSTATUS(status))
+        {
+            return false;
+        }
     }
 
+    /* Close file */
     close(fd);
-
-    /* Call execv, returning false if there is an error */
-    int ret = execv(command[0], command);
-    if (ret == -1)
-    {
-        return false;
-    }
-
-    /* Call waitpid, returning false if there is an error */
-    int status;
-    pid_t w_pid = waitpid(pid, &status, WNOHANG);
-    if (w_pid == -1)
-    {
-        return false;
-    }
 
     va_end(args);
 
