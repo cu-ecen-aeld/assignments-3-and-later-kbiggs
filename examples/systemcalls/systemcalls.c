@@ -16,7 +16,6 @@ bool do_system(const char *cmd)
 {
     int sys_ret = system(cmd);
     bool ret_val =  (sys_ret == -1) ? false : true;
-
     return ret_val;
 }
 
@@ -87,7 +86,6 @@ bool do_exec(int count, ...)
     }       
 
     va_end(args);
-
     return true;
 }
 
@@ -162,8 +160,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
     /* Close file */
     close(fd);
-
     va_end(args);
-
     return true;
 }
