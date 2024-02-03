@@ -57,33 +57,34 @@ bool do_exec(int count, ...)
     {
         return false;
     }    
-    /* If fork was successful, try calling execv */
+    /* If fork was successful (pid of 0 indicates in the child), try calling execv */
     else if (pid == 0)
     {
-        /* Child calls execv, returning false if there is an error */
+        /* Child calls execv, returning false if there is an error.
+           Exec should only return if there is an error. */
         int ret = execv(command[0], command);
         if (ret == -1)
         {
             return false;
         }
     }
-    else
+    
+    /* Wait for the particular pid child process we created, 
+       which means the parent will wait until this child has executed.
+       Return false if there is an error. */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, 0);
+    if (w_pid == -1)
     {
-        /* Call waitpid from parent, returning false if there is an error */
-        int status;
-        pid_t w_pid = waitpid(pid, &status, 0);
-        if (w_pid == -1)
-        {
-            return false;
-        }
+        return false;
+    }
 
-        /* If child terminated normally, and the exit status of
-           the child is non-zero, return false */
-        if (WIFEXITED(status) && WEXITSTATUS(status))
-        {
-            return false;
-        }
-    }       
+    /* If child terminated normally, but the exit status of
+       the child is non-zero, return false */
+    if (WIFEXITED(status) && WEXITSTATUS(status))
+    {
+        return false;
+    }
 
     va_end(args);
     return true;
@@ -124,38 +125,44 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     pid_t pid = fork();    
     if (pid == -1)
     {
+        close(fd);
         return false;
     }    
-    /* If fork was successful, try calling execv */
+    /* If fork was successful (pid of 0 indicates in the child), try calling execv */
     else if (pid == 0)
     {
         if (dup2(fd, 1) < 0)
         {
+            close(fd);
             return false;
         }
-        /* Child calls execv, returning false if there is an error */
+        /* Child calls execv, returning false if there is an error.
+           Exec should only return if there is an error. */
         int ret = execv(command[0], command);
         if (ret == -1)
         {
+            close(fd);
             return false;
         }
     }
-    else
+    
+    /* Wait for the particular pid child process we created, 
+       which means the parent will wait until this child has executed.
+       Return false if there is an error. */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, 0);
+    if (w_pid == -1)
     {
-        /* Call waitpid from parent, returning false if there is an error */
-        int status;
-        pid_t w_pid = waitpid(pid, &status, 0);
-        if (w_pid == -1)
-        {
-            return false;
-        }
+        close(fd);
+        return false;
+    }
 
-        /* If child terminated normally, and the exit status of
-           the child is non-zero, return false */
-        if (WIFEXITED(status) && WEXITSTATUS(status))
-        {
-            return false;
-        }
+    /* If child terminated normally, but the exit status of
+        the child is non-zero, return false */
+    if (WIFEXITED(status) && WEXITSTATUS(status))
+    {
+        close(fd);
+        return false;
     }
 
     /* Close file */
