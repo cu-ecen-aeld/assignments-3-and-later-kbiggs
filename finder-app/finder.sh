@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # CU AESD Assignment 1
 # Katie Biggs

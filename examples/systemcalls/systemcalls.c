@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -9,15 +14,9 @@
 */
 bool do_system(const char *cmd)
 {
-
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
-
-    return true;
+    int sys_ret = system(cmd);
+    bool ret_val =  (sys_ret == -1) ? false : true;
+    return ret_val;
 }
 
 /**
@@ -45,22 +44,49 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
+    /* Confirm that path provided is absolute */
+    if (command[0][0] != '/')
+    {
+        return false;
+    }
+
+    /* Call fork, returning false if there is an error in invocation */
+    pid_t pid = fork();    
+    if (pid == -1)
+    {
+        return false;
+    }    
+    /* If fork was successful (pid of 0 indicates in the child), try calling execv */
+    else if (pid == 0)
+    {
+        /* Child calls execv, returning false if there is an error.
+           Exec should only return if there is an error. */
+        int ret = execv(command[0], command);
+        if (ret == -1)
+        {
+            return false;
+        }
+    }
+    
+    /* Wait for the particular pid child process we created, 
+       which means the parent will wait until this child has executed.
+       Return false if there is an error. */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, 0);
+    if (w_pid == -1)
+    {
+        return false;
+    }
+
+    /* If child terminated normally, but the exit status of
+       the child is non-zero, return false */
+    if (WIFEXITED(status) && WEXITSTATUS(status))
+    {
+        return false;
+    }
 
     va_end(args);
-
     return true;
 }
 
@@ -80,20 +106,67 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
+    /* Confirm that path provided is absolute */
+    if (command[0][0] != '/')
+    {
+        return false;
+    }
 
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
+    /* Open file to redirect standard out */
+    /* Content inspired by https://stackoverflow.com/questions/13784269/redirection-inside-call-to-execvp-not-working/13784315#13784315 */
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0)
+    {
+        return false;
+    }
 
+    /* Call fork, returning false if there is an error in invocation */
+    pid_t pid = fork();    
+    if (pid == -1)
+    {
+        close(fd);
+        return false;
+    }    
+    /* If fork was successful (pid of 0 indicates in the child), try calling execv */
+    else if (pid == 0)
+    {
+        if (dup2(fd, 1) < 0)
+        {
+            close(fd);
+            return false;
+        }
+        /* Child calls execv, returning false if there is an error.
+           Exec should only return if there is an error. */
+        int ret = execv(command[0], command);
+        if (ret == -1)
+        {
+            close(fd);
+            return false;
+        }
+    }
+    
+    /* Wait for the particular pid child process we created, 
+       which means the parent will wait until this child has executed.
+       Return false if there is an error. */
+    int status;
+    pid_t w_pid = waitpid(pid, &status, 0);
+    if (w_pid == -1)
+    {
+        close(fd);
+        return false;
+    }
+
+    /* If child terminated normally, but the exit status of
+        the child is non-zero, return false */
+    if (WIFEXITED(status) && WEXITSTATUS(status))
+    {
+        close(fd);
+        return false;
+    }
+
+    /* Close file */
+    close(fd);
     va_end(args);
-
     return true;
 }
