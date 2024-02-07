@@ -19,15 +19,18 @@ void* threadfunc(void* thread_param)
 
     // sleep for wait to obtain ms
     sleep(sec_to_wait_to_obtain);
+    ERROR_LOG("after first sleep");
     
     // obtain mutex
     if (pthread_mutex_lock(thread_func_args->mutex))
     {
         return thread_param;
     }
+    ERROR_LOG("after lock");
     
     // hold mutex for wait to release ms
     sleep(sec_to_wait_to_release);
+    ERROR_LOG("after second sleep");
 
     // if completed successfully, populate thread_complete_success with true
     thread_func_args->thread_complete_success = true;
@@ -37,6 +40,7 @@ void* threadfunc(void* thread_param)
     {
         return thread_param;
     }
+    ERROR_LOG("after unlock");
 
     return thread_param;
 }
