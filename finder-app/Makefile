@@ -3,6 +3,8 @@
 # https://makefiletutorial.com/#command-line-arguments-and-override
 # https://stackoverflow.com/questions/2826029/passing-additional-variables-from-command-line-to-make
 
+all: writer
+
 writer: writer.o
 	$(CROSS_COMPILE)gcc -o writer writer.o
 
