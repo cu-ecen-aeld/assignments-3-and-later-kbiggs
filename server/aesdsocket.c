@@ -65,7 +65,8 @@ int main(int argc, char* argv[])
     openlog("AESD Socket", 0, LOG_USER);
 
     // Open file for writing
-    int fd = open(LOG_FILE, O_CREAT|O_APPEND|O_WRONLY, S_IRWXU | S_IROTH);
+    //int fd = open(LOG_FILE, O_CREAT|O_APPEND|O_WRONLY|O_DSYNC, S_IRWXU | S_IROTH);
+    FILE *fp;
 
     // open stream socket with port 9000 (fail and return -1 if any socket connection steps fail)
     memset(&hints, 0, sizeof(hints));
@@ -123,6 +124,7 @@ int main(int argc, char* argv[])
         client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_size);
         if (client_fd == -1)
         {
+            printf("Issue accepting connection\n");
             continue;
         }
 
@@ -131,16 +133,59 @@ int main(int argc, char* argv[])
                   get_in_addr((struct sockaddr *)&client_addr),
                   s, sizeof(s));
 
+        printf("Accepted connection from %s\n", s);
         syslog(LOG_USER, "Accepted connection from %s", s);
 
         // Receive data over connection
         // Create /var/tmp/aesdsocketdata & append data received
         // Each packet is complete when newline character is received
         // Packet should be shorter than available heap, but handle malloc failures to discard over-length packets
+        char buf[256] = {0};
+        int bytes_recv;
+        fp = fopen(LOG_FILE, "w+");
+        while ((bytes_recv = recv(client_fd, buf, 256, 0)) > 0)
+        {
+            if (bytes_recv == -1)
+            {
+                printf("Error receiving\n");
+                retval = -1;
+                continue;
+            }
+            
+            printf("bytes recv %d\n", bytes_recv);
+            printf("bytes %s\n", buf);
+
+            /*char * new_line_found = memchr(buf, '\n', 256);
+
+            if (new_line_found != NULL)
+            {
+                bytes_recv -= 1;
+            }*/
+
+            fwrite(buf, bytes_recv, 1, fp);
+        }
+
+        fclose(fp);
 
         // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
+        fp = fopen(LOG_FILE, "r+");
+        char read_buf[256] = {0};
+        int bytes_read;
+        while (!feof(fp))
+        {
+            bytes_read = fread(read_buf, 1, 256, fp);
+            printf("bytes read %d\n", bytes_read);
+            printf("buffer %s\n", read_buf);
+            char *msg_to_send = read_buf;
+            int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
+            printf("bytes sent %d\n", bytes_sent);
+        }
+        fclose(fp);      
 
         // Log message to syslog when connection closes "Closed connection of XXX"
+        close(client_fd);
+        syslog(LOG_USER, "Closed connection from %s", s);
+        printf("closed\n");
     }
     
     // When SIGINT or SIGTERM received, complete open connection operations, close open sockets, delete /var/tmp/aesdsocketdata
@@ -150,7 +195,7 @@ int main(int argc, char* argv[])
     syslog(LOG_USER, "Caught signal, exiting");
     closelog();
     close(sock_fd);
-    close(fd);
+    //fclose(fp);
     remove(LOG_FILE);
 
     return retval;
