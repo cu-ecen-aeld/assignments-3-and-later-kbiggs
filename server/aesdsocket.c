@@ -142,9 +142,16 @@ int main(int argc, char* argv[])
         // Packet should be shorter than available heap, but handle malloc failures to discard over-length packets
         char buf[256] = {0};
         int bytes_recv;
-        fp = fopen(LOG_FILE, "w+");
-        while ((bytes_recv = recv(client_fd, buf, 256, 0)) > 0)
+        bool more_bytes_to_read = true;
+        fp = fopen(LOG_FILE, "a+");
+        do
         {
+            bytes_recv = recv(client_fd, buf, 256, 0);
+            if (bytes_recv <= 0)
+            {
+                more_bytes_to_read = false;
+            }
+            
             if (bytes_recv == -1)
             {
                 printf("Error receiving\n");
@@ -155,22 +162,25 @@ int main(int argc, char* argv[])
             printf("bytes recv %d\n", bytes_recv);
             printf("bytes %s\n", buf);
 
-            /*char * new_line_found = memchr(buf, '\n', 256);
+            char * new_line_found = memchr(buf, '\n', 256);
 
             if (new_line_found != NULL)
             {
-                bytes_recv -= 1;
-            }*/
+                more_bytes_to_read = false;
+            }
 
             fwrite(buf, bytes_recv, 1, fp);
-        }
+            printf("file write complete\n");
+        } while (more_bytes_to_read);
 
         fclose(fp);
+        printf("file closed for write\n");
 
         // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
         fp = fopen(LOG_FILE, "r+");
         char read_buf[256] = {0};
         int bytes_read;
+        printf("file opened for read\n");
         while (!feof(fp))
         {
             bytes_read = fread(read_buf, 1, 256, fp);
