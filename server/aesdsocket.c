@@ -69,6 +69,14 @@ int main(int argc, char* argv[])
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
 
+    // Check for daemon
+    bool run_daemon;
+    if (argc > 1 && (strcmp(argv[1], "-d") == 0))
+    {
+        run_daemon = true;
+        printf("a daemon\n");
+    }
+
     // Register for signals
     retval = register_signals();
 
@@ -114,6 +122,21 @@ int main(int argc, char* argv[])
     }
 
     freeaddrinfo(serv_info);
+
+    // Check for daemon
+    if (run_daemon)
+    {
+        pid_t pid = fork();
+
+        if (pid < 0)
+        {
+            exit(EXIT_FAILURE);
+        }
+        else if (pid > 0)
+        {
+            exit(EXIT_SUCCESS);
+        }
+    }
 
     // listen for connection
     if (listen(sock_fd, 5) != 0)
