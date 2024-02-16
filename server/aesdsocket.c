@@ -70,7 +70,7 @@ int main(int argc, char* argv[])
     struct sockaddr_storage client_addr;
 
     // Check for daemon
-    bool run_daemon;
+    bool run_daemon = false;
     if (argc > 1 && (strcmp(argv[1], "-d") == 0))
     {
         run_daemon = true;
@@ -163,7 +163,7 @@ int main(int argc, char* argv[])
                   get_in_addr((struct sockaddr *)&client_addr),
                   s, sizeof(s));
 
-        printf("Accepted connection from %s\n", s);
+        //printf("Accepted connection from %s\n", s);
         syslog(LOG_USER, "Accepted connection from %s", s);
 
         char buf[256] = {0};
@@ -213,7 +213,7 @@ int main(int argc, char* argv[])
         {
             bytes_read = fread(read_buf, 1, 256, fp);
             printf("bytes read %d\n", bytes_read);
-            printf("buffer %s\n", read_buf);
+            //printf("buffer %s\n", read_buf);
             char *msg_to_send = read_buf;
             int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
             printf("bytes sent %d\n", bytes_sent);
