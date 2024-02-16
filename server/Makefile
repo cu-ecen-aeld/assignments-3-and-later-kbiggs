@@ -1,5 +1,3 @@
-CC=gcc
-
 default : aesdsocket
 
 all : aesdsocket
