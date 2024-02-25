@@ -1,6 +1,6 @@
-/* CU AESD Assignment 5
+/* CU AESD Assignment 6
    Katie Biggs
-   February 18, 2024   */
+   February 25, 2024   */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,15 +16,30 @@
 #include <stdbool.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/queue.h>
+#include <pthread.h>
 
 const char * LOG_FILE = "/var/tmp/aesdsocketdata";
 const char * PORT = "9000";
 
 int sock_fd = -1;
 
+//TODO - type for thread info
+struct thread_data {
+    bool thread_complete;
+    //thread id?
+};
+
+//TODO - mutex
+
+//TODO - thread function (move receive/send here, set complete flag)
+// mutex lock/unlock around writing to /var/tmp/aesdsocketdata
+// exit when connection closed or error during send/receive
+
 static void signal_handler(int sig_num)
 {
     syslog(LOG_USER, "Caught signal, exiting");
+    //TODO - request exit from each thread and wait for complete
     closelog();
     close(sock_fd);
     shutdown(sock_fd, SHUT_RDWR);
@@ -60,12 +75,86 @@ void *get_in_addr(struct sockaddr *sa)
     : (void *) &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+int handle_client(int client_fd)
+{
+    int retval = 0;
+    FILE *fp;
+
+    // Create /var/tmp/aesdsocketdata & append data received
+    char buf[512] = {0};
+    int  bytes_recv;
+    bool more_bytes_to_read = true;
+    fp = fopen(LOG_FILE, "a+");
+    while (more_bytes_to_read)
+    {
+        // Receive data over connection
+        bytes_recv = recv(client_fd, buf, 512, 0);
+        if (bytes_recv == -1)
+        {
+            syslog(LOG_ERR, "Error receiving data");
+            more_bytes_to_read = false;
+            retval = -1;
+            continue;
+        }
+        else if (bytes_recv == 0)
+        {
+            more_bytes_to_read = false;
+        }
+        
+        syslog(LOG_INFO, "Received %d bytes", bytes_recv);
+
+        // Each packet is complete when newline character is received
+        char * new_line_found = memchr(buf, '\n', 512);
+        if (new_line_found != NULL)
+        {
+            more_bytes_to_read = false;
+        }
+
+        fwrite(buf, bytes_recv, 1, fp);
+        syslog(LOG_INFO, "Completed file write");
+    }
+
+    fclose(fp);
+
+    // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
+    char read_buf[512] = {0};
+    int  bytes_read;
+    fp = fopen(LOG_FILE, "r+");
+    while (!feof(fp))
+    {
+        bytes_read = fread(read_buf, 1, 512, fp);
+        char *msg_to_send = read_buf;
+        int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
+        if (bytes_sent == -1)
+        {
+            syslog(LOG_ERR, "Error sending bytes");
+            retval = -1;
+        }
+        syslog(LOG_INFO, "Read %d bytes, sent %d bytes", bytes_read, bytes_sent);
+    }
+    fclose(fp);
+
+    // Log message to syslog when connection closes
+    if (close(client_fd) != 0)
+    {
+        syslog(LOG_ERR, "Error closing client socket");
+        retval = -1;
+    }
+    else
+    {
+        syslog(LOG_USER, "Closed connection from client");
+    }
+
+    return retval;
+}
+
 int main(int argc, char* argv[])
 {
     int    retval = 0, client_fd;
-    FILE   *fp;
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
+
+    //TODO - initialize timer for writing timestamp every 10 seconds
 
     // Check for daemon
     bool run_daemon = false;
@@ -156,8 +245,16 @@ int main(int argc, char* argv[])
 
         // Redirect stdin/out/err to /dev/null
         open("/dev/null", O_RDWR);
-        dup(0);
-        dup(0);
+        if (dup(0) == -1)
+        {
+            close(sock_fd);
+            exit(EXIT_FAILURE);
+        }
+        if (dup(0) == -1)
+        {
+            close(sock_fd);
+            exit(EXIT_FAILURE);
+        }
     }
 
     // listen for connection
@@ -166,6 +263,8 @@ int main(int argc, char* argv[])
         syslog(LOG_ERR, "Error listening");
         retval = -1;
     }
+    
+    // TODO - instantiate singly linked list
     
     // Accept connections until SIGINT or SIGTERM received
     while (retval != -1)
@@ -187,70 +286,13 @@ int main(int argc, char* argv[])
 
         syslog(LOG_USER, "Accepted connection from %s", ip_addr);
 
-        // Create /var/tmp/aesdsocketdata & append data received
-        char buf[256] = {0};
-        int  bytes_recv;
-        bool more_bytes_to_read = true;
-        fp = fopen(LOG_FILE, "a+");
-        while (more_bytes_to_read)
-        {
-            // Receive data over connection
-            bytes_recv = recv(client_fd, buf, 256, 0);
-            if (bytes_recv == -1)
-            {
-                syslog(LOG_ERR, "Error receiving data");
-                more_bytes_to_read = false;
-                retval = -1;
-                continue;
-            }
-            else if (bytes_recv == 0)
-            {
-                more_bytes_to_read = false;
-            }
-            
-            syslog(LOG_INFO, "Received %d bytes", bytes_recv);
+        retval = handle_client(client_fd);
 
-            // Each packet is complete when newline character is received
-            char * new_line_found = memchr(buf, '\n', 256);
-            if (new_line_found != NULL)
-            {
-                more_bytes_to_read = false;
-            }
+        // TODO - now that we've accepted connection, declare/init/insert element at head
+        // instantiate thread
 
-            fwrite(buf, bytes_recv, 1, fp);
-            syslog(LOG_INFO, "Completed file write");
-        }
-
-        fclose(fp);
-
-        // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
-        char read_buf[256] = {0};
-        int  bytes_read;
-        fp = fopen(LOG_FILE, "r+");
-        while (!feof(fp))
-        {
-            bytes_read = fread(read_buf, 1, 256, fp);
-            char *msg_to_send = read_buf;
-            int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
-            if (bytes_sent == -1)
-            {
-                syslog(LOG_ERR, "Error sending bytes");
-                retval = -1;
-            }
-            syslog(LOG_INFO, "Read %d bytes, sent %d bytes", bytes_read, bytes_sent);
-        }
-        fclose(fp);
-
-        // Log message to syslog when connection closes
-        if (close(client_fd) != 0)
-        {
-            syslog(LOG_ERR, "Error closing client socket %s", ip_addr);
-            retval = -1;
-        }
-        else
-        {
-            syslog(LOG_USER, "Closed connection from %s", ip_addr);
-        }        
+        // iterate over linked list, remove from list if flag is set
+        // also call pthread join 
     }
     
     // When SIGINT or SIGTERM received,
