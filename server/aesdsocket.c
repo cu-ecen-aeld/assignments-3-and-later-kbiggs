@@ -31,15 +31,13 @@ struct thread_data {
 };
 
 //TODO - mutex
-
-//TODO - thread function (move receive/send here, set complete flag)
-// mutex lock/unlock around writing to /var/tmp/aesdsocketdata
-// exit when connection closed or error during send/receive
+pthread_mutex_t log_mutex;
 
 static void signal_handler(int sig_num)
 {
     syslog(LOG_USER, "Caught signal, exiting");
     //TODO - request exit from each thread and wait for complete
+    pthread_mutex_destroy(&log_mutex);
     closelog();
     close(sock_fd);
     shutdown(sock_fd, SHUT_RDWR);
@@ -75,6 +73,9 @@ void *get_in_addr(struct sockaddr *sa)
     : (void *) &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+//TODO - thread function (move receive/send here, set complete flag)
+// mutex lock/unlock around writing to /var/tmp/aesdsocketdata
+// exit when connection closed or error during send/receive
 int handle_client(int client_fd)
 {
     int retval = 0;
@@ -84,6 +85,7 @@ int handle_client(int client_fd)
     char buf[512] = {0};
     int  bytes_recv;
     bool more_bytes_to_read = true;
+    pthread_mutex_lock(&log_mutex);
     fp = fopen(LOG_FILE, "a+");
     while (more_bytes_to_read)
     {
@@ -113,12 +115,13 @@ int handle_client(int client_fd)
         fwrite(buf, bytes_recv, 1, fp);
         syslog(LOG_INFO, "Completed file write");
     }
-
     fclose(fp);
+    pthread_mutex_unlock(&log_mutex);
 
     // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
     char read_buf[512] = {0};
     int  bytes_read;
+    pthread_mutex_lock(&log_mutex);
     fp = fopen(LOG_FILE, "r+");
     while (!feof(fp))
     {
@@ -133,6 +136,7 @@ int handle_client(int client_fd)
         syslog(LOG_INFO, "Read %d bytes, sent %d bytes", bytes_read, bytes_sent);
     }
     fclose(fp);
+    pthread_mutex_unlock(&log_mutex);
 
     // Log message to syslog when connection closes
     if (close(client_fd) != 0)
@@ -168,6 +172,13 @@ int main(int argc, char* argv[])
 
     // Open syslog
     openlog("AESD Socket", 0, LOG_USER);
+
+    // Initialize mutex
+    if (pthread_mutex_init(&log_mutex, NULL) != 0)
+    {
+        syslog(LOG_ERR, "Error initializing mutex");
+        retval = -1;
+    }
 
     // open stream socket with port 9000
     memset(&hints, 0, sizeof(hints));
@@ -295,9 +306,12 @@ int main(int argc, char* argv[])
         // also call pthread join 
     }
     
-    // When SIGINT or SIGTERM received,
-    // complete open connection operations, close open sockets, delete /var/tmp/aesdsocketdata
-    // Log message to syslog "Caught signal, exiting"    
+    if (pthread_mutex_destroy(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error destroying mutex");
+        retval = -1;
+    }
+    
     syslog(LOG_INFO, "Closing aesdsocket application");
     closelog();
     close(sock_fd);
