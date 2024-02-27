@@ -26,8 +26,10 @@ int sock_fd = -1;
 
 //TODO - type for thread info
 struct thread_data {
-    bool thread_complete;
-    //thread id?
+    bool        thread_complete;
+    int         client_fd;
+    pthread_t   thread_id;
+    SLIST_ENTRY(thread_data) next_thread;
 };
 
 //TODO - mutex
@@ -76,9 +78,10 @@ void *get_in_addr(struct sockaddr *sa)
 //TODO - thread function (move receive/send here, set complete flag)
 // mutex lock/unlock around writing to /var/tmp/aesdsocketdata
 // exit when connection closed or error during send/receive
-int handle_client(int client_fd)
+int handle_client(struct thread_data* thread_func_args)
 {
     int retval = 0;
+    int client_fd = thread_func_args->client_fd;
     FILE *fp;
 
     // Create /var/tmp/aesdsocketdata & append data received
@@ -152,11 +155,20 @@ int handle_client(int client_fd)
     return retval;
 }
 
+void* thread_func(void* thread_params)
+{
+    struct thread_data* thread_func_args = (struct thread_data *) thread_params;
+    handle_client(thread_func_args);
+    thread_func_args->thread_complete = true;
+    return thread_params;
+}
+
 int main(int argc, char* argv[])
 {
     int    retval = 0, client_fd;
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
+    pthread_t thread;
 
     //TODO - initialize timer for writing timestamp every 10 seconds
 
@@ -179,6 +191,10 @@ int main(int argc, char* argv[])
         syslog(LOG_ERR, "Error initializing mutex");
         retval = -1;
     }
+
+    // Initialize SLIST
+    SLIST_HEAD(slist_head, thread_data) head;
+    SLIST_INIT(&head);
 
     // open stream socket with port 9000
     memset(&hints, 0, sizeof(hints));
@@ -297,13 +313,38 @@ int main(int argc, char* argv[])
 
         syslog(LOG_USER, "Accepted connection from %s", ip_addr);
 
-        retval = handle_client(client_fd);
-
         // TODO - now that we've accepted connection, declare/init/insert element at head
         // instantiate thread
+        struct thread_data *thread_struct = (struct thread_data *) malloc(sizeof(struct thread_data));
+        if (thread_struct == NULL)
+        {
+            syslog(LOG_ERR, "Malloc failure");
+            retval = -1;
+        }
+        thread_struct->client_fd = client_fd;
+        thread_struct->thread_complete = false;        
+        int id = pthread_create(&thread, NULL, thread_func, thread_struct);        
+        thread_struct->thread_id = thread;
+        SLIST_INSERT_HEAD(&head, thread_struct, next_thread);
+
+        if (id != 0)
+        {
+            syslog(LOG_ERR, "Error creating new thread");
+            retval = -1;
+        }
 
         // iterate over linked list, remove from list if flag is set
         // also call pthread join 
+        SLIST_FOREACH(thread_struct, &head, next_thread)
+        {
+            if (thread_struct->thread_complete)
+            {
+                syslog(LOG_INFO, "Thread complete, joining");
+                pthread_join(thread_struct->thread_id, NULL);
+                SLIST_REMOVE_HEAD(&head, next_thread);
+                //free(thread_struct);
+            }
+        }      
     }
     
     if (pthread_mutex_destroy(&log_mutex) != 0)
