@@ -33,9 +33,9 @@ struct thread_data {
     SLIST_ENTRY(thread_data) next_thread;
 };
 
-struct timer_thread_data {
+/*struct timer_thread_data {
     unsigned int timer_count;
-};
+};*/
 
 pthread_mutex_t log_mutex;
 
@@ -51,7 +51,12 @@ static void signal_handler(int sig_num)
     exit(EXIT_SUCCESS);
 }
 
-static void timer_thread(union sigval sigval)
+static void timer_handler(int sig, siginfo_t *si, void *uc)
+{
+    printf("timer signal\n");
+}
+
+/*static void timer_thread(union sigval sigval)
 {
     struct timer_thread_data *td = (struct timer_thread_data*) sigval.sival_ptr;
     
@@ -91,7 +96,7 @@ static void timer_thread(union sigval sigval)
             syslog(LOG_ERR, "Error unlocking thread");
         }
     }
-}
+}*/
 
 int register_signals(void)
 {
@@ -215,7 +220,7 @@ int main(int argc, char* argv[])
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
     pthread_t thread;
-    struct timer_thread_data td;
+    /*struct timer_thread_data td;
     struct sigevent sev;
     timer_t timer_id;
 
@@ -234,8 +239,37 @@ int main(int argc, char* argv[])
     itimerspec.it_interval.tv_sec = 10;
     itimerspec.it_interval.tv_nsec = 0;
     //timespec_add(&itimerspec.it_value, start_time, &itimerspec.it_intveral);
-    timer_settime(timer_id, TIMER_ABSTIME, &itimerspec, NULL);
+    timer_settime(timer_id, TIMER_ABSTIME, &itimerspec, NULL);*/
 
+    timer_t timer_id;
+    sigset_t mask;
+    struct sigaction sa;
+    struct sigevent  sev;
+    struct itimerspec its;
+
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGRTMIN, &sa, NULL);
+
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGRTMIN);
+    sigprocmask(SIG_SETMASK, &mask, NULL);
+
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGRTMIN;
+    sev.sigev_value.sival_ptr = &timer_id;
+    timer_create(CLOCK_REALTIME, &sev, &timer_id);
+
+    its.it_value.tv_sec = 10;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+    timer_settime(timer_id, 0, &its, NULL);
+
+    sigprocmask(SIG_UNBLOCK, &mask, NULL);
+    
     // Check for daemon
     bool run_daemon = false;
     if (argc > 1 && (strcmp(argv[1], "-d") == 0))
