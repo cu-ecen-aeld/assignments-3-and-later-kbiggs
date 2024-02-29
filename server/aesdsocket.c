@@ -18,13 +18,14 @@
 #include <netdb.h>
 #include <sys/queue.h>
 #include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 const char * LOG_FILE = "/var/tmp/aesdsocketdata";
 const char * PORT = "9000";
 
 int sock_fd = -1;
 
-//TODO - type for thread info
 struct thread_data {
     bool        thread_complete;
     int         client_fd;
@@ -32,7 +33,10 @@ struct thread_data {
     SLIST_ENTRY(thread_data) next_thread;
 };
 
-//TODO - mutex
+struct timer_thread_data {
+    unsigned int timer_count;
+};
+
 pthread_mutex_t log_mutex;
 
 static void signal_handler(int sig_num)
@@ -45,6 +49,48 @@ static void signal_handler(int sig_num)
     shutdown(sock_fd, SHUT_RDWR);
     remove(LOG_FILE);
     exit(EXIT_SUCCESS);
+}
+
+static void timer_thread(union sigval sigval)
+{
+    struct timer_thread_data *td = (struct timer_thread_data*) sigval.sival_ptr;
+    
+    char buf[200] = {0};
+    time_t t;
+    struct tm *tmp;
+
+    t = time(NULL);
+    tmp = localtime(&t);
+    if (tmp == NULL)
+    {
+        syslog(LOG_ERR, "Error getting localtime");
+        exit(EXIT_FAILURE);
+    }
+
+    // Write timestamp:time with newline
+    // year, month, day, hour (24 hr), minute, second
+    if (strftime(buf, sizeof(buf), "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp) == 0)
+    {
+        syslog(LOG_ERR, "Strftime returned 0");
+        exit(EXIT_FAILURE);
+    }
+    printf("%s", buf);
+    
+    if (pthread_mutex_lock(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error locking mutex during timer call");
+    }
+    else
+    {
+        td->timer_count++;
+        FILE *fp = fopen(LOG_FILE, "a+");     
+        fputs(buf, fp);
+        fclose(fp);
+        if (pthread_mutex_unlock(&log_mutex) != 0)
+        {
+            syslog(LOG_ERR, "Error unlocking thread");
+        }
+    }
 }
 
 int register_signals(void)
@@ -75,7 +121,7 @@ void *get_in_addr(struct sockaddr *sa)
     : (void *) &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-//TODO - thread function (move receive/send here, set complete flag)
+// Thread function (move receive/send here, set complete flag)
 // mutex lock/unlock around writing to /var/tmp/aesdsocketdata
 // exit when connection closed or error during send/receive
 int handle_client(struct thread_data* thread_func_args)
@@ -169,8 +215,26 @@ int main(int argc, char* argv[])
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
     pthread_t thread;
+    struct timer_thread_data td;
+    struct sigevent sev;
+    timer_t timer_id;
 
     //TODO - initialize timer for writing timestamp every 10 seconds
+    memset(&td, 0, sizeof(struct timer_thread_data));
+    memset(&sev, 0, sizeof(struct sigevent));
+    clockid_t clock_id = CLOCK_MONOTONIC;
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_value.sival_ptr = &td;
+    sev.sigev_notify_function = timer_thread;
+    timer_create(clock_id, &sev, &timer_id);
+    struct timespec start_time;
+    clock_gettime(clock_id, &start_time);
+    struct itimerspec itimerspec;
+    memset(&itimerspec, 0, sizeof(struct itimerspec));
+    itimerspec.it_interval.tv_sec = 10;
+    itimerspec.it_interval.tv_nsec = 0;
+    //timespec_add(&itimerspec.it_value, start_time, &itimerspec.it_intveral);
+    timer_settime(timer_id, TIMER_ABSTIME, &itimerspec, NULL);
 
     // Check for daemon
     bool run_daemon = false;
@@ -291,8 +355,6 @@ int main(int argc, char* argv[])
         retval = -1;
     }
     
-    // TODO - instantiate singly linked list
-    
     // Accept connections until SIGINT or SIGTERM received
     while (retval != -1)
     {
@@ -313,7 +375,7 @@ int main(int argc, char* argv[])
 
         syslog(LOG_USER, "Accepted connection from %s", ip_addr);
 
-        // TODO - now that we've accepted connection, declare/init/insert element at head
+        // Now that we've accepted connection, declare/init/insert element at head
         // instantiate thread
         struct thread_data *thread_struct = (struct thread_data *) malloc(sizeof(struct thread_data));
         if (thread_struct == NULL)
