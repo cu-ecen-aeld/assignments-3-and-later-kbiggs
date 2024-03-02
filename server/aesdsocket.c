@@ -127,6 +127,8 @@ int init_timer(void)
         retval = -1;
     }
     
+    free(timer_id);
+
     return retval;
 }
 
@@ -258,7 +260,8 @@ int handle_client(struct thread_data_s* thread_func_args)
         syslog(LOG_INFO, "Completed file write");
         fclose(fp);
         pthread_mutex_unlock(&log_mutex);
-    }    
+    }
+    free(final_buffer);
 
     // Once write completes, return full content of /var/tmp/aesdsocketdata to client
     char read_buf[512] = {0};
@@ -489,7 +492,7 @@ int main(int argc, char* argv[])
 
         // iterate over linked list, remove from list if flag is set
         // also call pthread join 
-        struct thread_data_s *thread_ptr = NULL;
+        /*struct thread_data_s *thread_ptr = NULL;
         struct thread_data_s *next_thread = NULL
         SLIST_FOREACH_SAFE(thread_ptr, &head, entries, next_thread)
         {
@@ -505,7 +508,7 @@ int main(int argc, char* argv[])
                 SLIST_REMOVE(&head, thread_ptr, thread_data_s, entries);
                 free(thread_ptr);
             }
-        }
+        }*/
     }
 
     syslog(LOG_USER, "Caught signal, exiting");
