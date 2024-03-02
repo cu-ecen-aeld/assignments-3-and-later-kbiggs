@@ -1,6 +1,11 @@
 /* CU AESD Assignment 6
    Katie Biggs
-   February 25, 2024   */
+   March 2, 2024   */
+
+#include "queue.h"
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,40 +20,40 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/queue.h>
-#include <pthread.h>
-#include <time.h>
-#include <unistd.h>
 
 const char * LOG_FILE = "/var/tmp/aesdsocketdata";
 const char * PORT = "9000";
+const int buf_size = 512;
+const int timer_dur_s = 10;
 
 int sock_fd = -1;
 bool timer_fired = false;
 bool signal_caught = false;
 
-struct thread_data {
+typedef struct thread_data_t thread_data_t;
+struct thread_data_s {
     bool        thread_complete;
     int         client_fd;
     pthread_t   thread_id;
-    SLIST_ENTRY(thread_data) next_thread;
+    SLIST_ENTRY(thread_data_s) entries;
 };
 
 pthread_mutex_t log_mutex;
 
+/* Signal handler for program terminating signals */
 static void signal_handler(int sig_num)
 {
-    syslog(LOG_USER, "Caught signal, exiting");
     signal_caught = true;
     shutdown(sock_fd, SHUT_RDWR);
 }
 
+/* Timer signal handler */
 static void timer_handler(int sig, siginfo_t *si, void *uc)
 {
     timer_fired = true;
 }
 
+/* Register for all necessary signals */
 int register_signals(void)
 {
     int retval = 0;
@@ -68,6 +73,107 @@ int register_signals(void)
     return retval;
 }
 
+/* Initialize the timer.
+   This functionality was based off of example provided at
+   https://man7.org/linux/man-pages/man2/timer_create.2.html */
+int init_timer(void)
+{
+    int retval = 0;
+    timer_t timer_id;
+    sigset_t mask;
+    struct sigaction sa;
+    struct sigevent  sev;
+    struct itimerspec its;
+
+    // Setup timer handler
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGRTMIN, &sa, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    // Temporarily disable all signals while initializing timer
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGRTMIN);
+    if (sigprocmask(SIG_SETMASK, &mask, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    // Create timer
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGRTMIN;
+    sev.sigev_value.sival_ptr = &timer_id;
+    if (timer_create(CLOCK_REALTIME, &sev, &timer_id) != 0)
+    {
+        retval = -1;
+    }
+
+    // Start time
+    its.it_value.tv_sec = timer_dur_s;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+    if (timer_settime(timer_id, 0, &its, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    if (sigprocmask(SIG_UNBLOCK, &mask, NULL) != 0)
+    {
+        retval = -1;
+    }
+    
+    return retval;
+}
+
+/* Handle printing the timestamp.
+   This functionality was based off of example provided at 
+   https://man7.org/linux/man-pages/man3/strftime.3.html */
+int print_timestamp(void)
+{
+    int retval = 0;
+    char buf[200] = {0};
+
+    time_t t = time(NULL);
+    struct tm *tmp = localtime(&t);
+    if (tmp == NULL)
+    {
+        syslog(LOG_ERR, "Error getting localtime");
+        retval = -1;
+    }
+
+    // Write timestamp:time with newline
+    // year, month, day, hour (24 hr), minute, second
+    if (strftime(buf, sizeof(buf), "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp) == 0)
+    {
+        syslog(LOG_ERR, "Strftime returned 0");
+        retval = -1;
+    }
+    
+    if (pthread_mutex_lock(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error locking mutex during timer call");
+        retval = -1;
+    }
+    else
+    {
+        FILE *fp = fopen(LOG_FILE, "a+");     
+        fputs(buf, fp);
+        fclose(fp);
+        if (pthread_mutex_unlock(&log_mutex) != 0)
+        {
+            syslog(LOG_ERR, "Error unlocking thread");
+            retval = -1;
+        }
+    }
+
+    return retval;
+}
+
 // Below function to get address info was utilized from the BGNet guide
 // https://github.com/thlorenz/beejs-guide-to-network-samples/blob/master/lib/get_in_addr.c
 void *get_in_addr(struct sockaddr *sa)
@@ -80,17 +186,16 @@ void *get_in_addr(struct sockaddr *sa)
 // Thread function (move receive/send here, set complete flag)
 // mutex lock/unlock around writing to /var/tmp/aesdsocketdata
 // exit when connection closed or error during send/receive
-int handle_client(struct thread_data* thread_func_args)
+int handle_client(struct thread_data_s* thread_func_args)
 {
     int retval = 0;
     int client_fd = thread_func_args->client_fd;
     FILE *fp;
-
-    // Create /var/tmp/aesdsocketdata & append data received
     char buf[512] = {0};
     int  bytes_recv, total_bytes_recv = 0;
     bool more_bytes_to_read = true;
 
+    // Create a buffer to store the final packet
     char *final_buffer = malloc(1);
     if (!final_buffer)
     {
@@ -99,7 +204,8 @@ int handle_client(struct thread_data* thread_func_args)
     }
     *final_buffer = '\0';
 
-    while (more_bytes_to_read)
+    // Receive all available bytes from the client
+    while (more_bytes_to_read && !(retval == -1))
     {
         bytes_recv = recv(client_fd, buf, 512, 0);
         syslog(LOG_INFO, "Received %d bytes", bytes_recv);
@@ -108,7 +214,6 @@ int handle_client(struct thread_data* thread_func_args)
             syslog(LOG_ERR, "Error receiving data");
             more_bytes_to_read = false;
             retval = -1;
-            continue;
         }
         else if (bytes_recv == 0)
         {
@@ -116,6 +221,7 @@ int handle_client(struct thread_data* thread_func_args)
         }
         else
         {
+            // Calculate the new buffer size needed to store packet and realloc
             int new_buf_len = strlen(final_buffer) + strlen(buf) + 1;
             char *tmp_buf = realloc(final_buffer, new_buf_len);
             if (!tmp_buf)
@@ -124,10 +230,13 @@ int handle_client(struct thread_data* thread_func_args)
                 retval = -1;
                 continue;
             }
+
+            // Move contents of most recent recv into final buffer
             final_buffer = tmp_buf;
             total_bytes_recv += bytes_recv;
             strcpy(final_buffer, buf);
 
+            // Check to see if we've gotten new line and are finished receiving
             char * new_line_found = memchr(final_buffer, '\n', 512);
             if (new_line_found != NULL)
             {
@@ -136,14 +245,22 @@ int handle_client(struct thread_data* thread_func_args)
         }
     }
 
-    pthread_mutex_lock(&log_mutex);
-    fp = fopen(LOG_FILE, "a+");
-    fwrite(final_buffer, total_bytes_recv, 1, fp);
-    syslog(LOG_INFO, "Completed file write");
-    fclose(fp);
-    pthread_mutex_unlock(&log_mutex);
+    // Open file and write the new packet contents
+    if (pthread_mutex_lock(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error locking mutex for file write");
+        retval = -1;
+    }
+    else
+    {
+        fp = fopen(LOG_FILE, "a+");
+        fwrite(final_buffer, total_bytes_recv, 1, fp);
+        syslog(LOG_INFO, "Completed file write");
+        fclose(fp);
+        pthread_mutex_unlock(&log_mutex);
+    }    
 
-    // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
+    // Once write completes, return full content of /var/tmp/aesdsocketdata to client
     char read_buf[512] = {0};
     int  bytes_read;
     fp = fopen(LOG_FILE, "r+");
@@ -177,7 +294,7 @@ int handle_client(struct thread_data* thread_func_args)
 
 void* thread_func(void* thread_params)
 {
-    struct thread_data* thread_func_args = (struct thread_data *) thread_params;
+    struct thread_data_s* thread_func_args = (struct thread_data_s *) thread_params;
     handle_client(thread_func_args);
     thread_func_args->thread_complete = true;
     return thread_params;
@@ -189,35 +306,6 @@ int main(int argc, char* argv[])
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
     pthread_t thread;
-
-    timer_t timer_id;
-    sigset_t mask;
-    struct sigaction sa;
-    struct sigevent  sev;
-    struct itimerspec its;
-
-    sa.sa_flags = SA_SIGINFO;
-    sa.sa_sigaction = timer_handler;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGRTMIN, &sa, NULL);
-
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGRTMIN);
-    sigprocmask(SIG_SETMASK, &mask, NULL);
-
-    sev.sigev_notify = SIGEV_SIGNAL;
-    sev.sigev_signo = SIGRTMIN;
-    sev.sigev_value.sival_ptr = &timer_id;
-    timer_create(CLOCK_REALTIME, &sev, &timer_id);
-
-    its.it_value.tv_sec = 10;
-    its.it_value.tv_nsec = 0;
-    its.it_interval.tv_sec = its.it_value.tv_sec;
-    its.it_interval.tv_nsec = its.it_value.tv_nsec;
-
-    timer_settime(timer_id, 0, &its, NULL);
-
-    sigprocmask(SIG_UNBLOCK, &mask, NULL);
     
     // Check for daemon
     bool run_daemon = false;
@@ -227,10 +315,19 @@ int main(int argc, char* argv[])
     }
 
     // Register for signals
-    retval = register_signals();
+    if (register_signals() != 0)
+    {
+        exit(EXIT_FAILURE);
+    }
 
     // Open syslog
     openlog("AESD Socket", 0, LOG_USER);
+
+    // Initialize timer
+    if (init_timer() != 0)
+    {
+        exit(EXIT_FAILURE);
+    }
 
     // Initialize mutex
     if (pthread_mutex_init(&log_mutex, NULL) != 0)
@@ -240,7 +337,7 @@ int main(int argc, char* argv[])
     }
 
     // Initialize SLIST
-    SLIST_HEAD(slist_head, thread_data) head;
+    SLIST_HEAD(slist_head, thread_data_s) head;
     SLIST_INIT(&head);
 
     // open stream socket with port 9000
@@ -343,40 +440,10 @@ int main(int argc, char* argv[])
     {
         if (timer_fired)
         {
-            char buf[200] = {0};
-            time_t t;
-            struct tm *tmp;
-
-            t = time(NULL);
-            tmp = localtime(&t);
-            if (tmp == NULL)
+            if (print_timestamp() != 0)
             {
-                syslog(LOG_ERR, "Error getting localtime");
-                exit(EXIT_FAILURE);
-            }
-
-            // Write timestamp:time with newline
-            // year, month, day, hour (24 hr), minute, second
-            if (strftime(buf, sizeof(buf), "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp) == 0)
-            {
-                syslog(LOG_ERR, "Strftime returned 0");
-                exit(EXIT_FAILURE);
-            }
-            printf("%s", buf);
-            
-            if (pthread_mutex_lock(&log_mutex) != 0)
-            {
-                syslog(LOG_ERR, "Error locking mutex during timer call");
-            }
-            else
-            {
-                FILE *fp = fopen(LOG_FILE, "a+");     
-                fputs(buf, fp);
-                fclose(fp);
-                if (pthread_mutex_unlock(&log_mutex) != 0)
-                {
-                    syslog(LOG_ERR, "Error unlocking thread");
-                }
+                retval = -1;
+                continue;
             }
             timer_fired = false;
         }
@@ -400,45 +467,58 @@ int main(int argc, char* argv[])
 
         // Now that we've accepted connection, declare/init/insert element at head
         // instantiate thread
-        struct thread_data *thread_struct = (struct thread_data *) malloc(sizeof(struct thread_data));
-        if (thread_struct == NULL)
+        struct thread_data_s *thread_struct = (struct thread_data_s *) malloc(sizeof(struct thread_data_s));
+        if (!thread_struct)
         {
             syslog(LOG_ERR, "Malloc failure");
             retval = -1;
+            continue;
         }
         thread_struct->client_fd = client_fd;
         thread_struct->thread_complete = false;        
         int id = pthread_create(&thread, NULL, thread_func, thread_struct);        
-        thread_struct->thread_id = thread;
-        SLIST_INSERT_HEAD(&head, thread_struct, next_thread);
-
         if (id != 0)
         {
             syslog(LOG_ERR, "Error creating new thread");
+            free(thread_struct);
             retval = -1;
+            continue;
         }
+        thread_struct->thread_id = thread;
+        SLIST_INSERT_HEAD(&head, thread_struct, entries);
 
         // iterate over linked list, remove from list if flag is set
         // also call pthread join 
-        SLIST_FOREACH(thread_struct, &head, next_thread)
+        struct thread_data_s *thread_ptr = NULL;
+        struct thread_data_s *next_thread = NULL
+        SLIST_FOREACH_SAFE(thread_ptr, &head, entries, next_thread)
         {
-            if (thread_struct->thread_complete)
+            if (thread_ptr->thread_complete)
             {
                 syslog(LOG_INFO, "Thread complete, joining");
-                pthread_join(thread_struct->thread_id, NULL);
-                SLIST_REMOVE_HEAD(&head, next_thread);
-                //free(thread_struct);
+                int id = pthread_join(thread_ptr->thread_id, NULL);
+                if (id != 0)
+                {
+                    syslog(LOG_ERR, "Failure joining thread");
+                    retval = -1;
+                }
+                SLIST_REMOVE(&head, thread_ptr, thread_data_s, entries);
+                free(thread_ptr);
             }
-        }      
+        }
     }
+
+    syslog(LOG_USER, "Caught signal, exiting");
     
-    if (pthread_mutex_destroy(&log_mutex) != 0)
+    // Request exit from each thread and wait for complete
+    while (!SLIST_EMPTY(&head))
     {
-        syslog(LOG_ERR, "Error destroying mutex");
-        retval = -1;
+        struct thread_data_s *thread_rm = SLIST_FIRST(&head);
+        pthread_join(thread_rm->thread_id, NULL);
+        SLIST_REMOVE_HEAD(&head, entries);
+        free(thread_rm);
     }
-    
-    //TODO - request exit from each thread and wait for complete
+
     syslog(LOG_INFO, "Closing aesdsocket application");
     pthread_mutex_destroy(&log_mutex);
     closelog();
