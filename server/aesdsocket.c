@@ -29,6 +29,7 @@ const int timer_dur_s = 10;
 int sock_fd = -1;
 bool timer_fired = false;
 bool signal_caught = false;
+timer_t timer_id;
 
 typedef struct thread_data_t thread_data_t;
 struct thread_data_s {
@@ -79,7 +80,6 @@ int register_signals(void)
 int init_timer(void)
 {
     int retval = 0;
-    timer_t timer_id;
     sigset_t mask;
     struct sigaction sa;
     struct sigevent  sev;
@@ -126,8 +126,6 @@ int init_timer(void)
     {
         retval = -1;
     }
-    
-    free(timer_id);
 
     return retval;
 }
@@ -155,6 +153,7 @@ int print_timestamp(void)
         syslog(LOG_ERR, "Strftime returned 0");
         retval = -1;
     }
+    //printf("%s\n", buf);
     
     if (pthread_mutex_lock(&log_mutex) != 0)
     {
@@ -326,12 +325,6 @@ int main(int argc, char* argv[])
     // Open syslog
     openlog("AESD Socket", 0, LOG_USER);
 
-    // Initialize timer
-    if (init_timer() != 0)
-    {
-        exit(EXIT_FAILURE);
-    }
-
     // Initialize mutex
     if (pthread_mutex_init(&log_mutex, NULL) != 0)
     {
@@ -431,6 +424,12 @@ int main(int argc, char* argv[])
         }
     }
 
+    // Initialize timer - needs to be called after fork
+    if (init_timer() != 0)
+    {
+        retval = -1;
+    }
+    
     // listen for connection
     if (listen(sock_fd, 5) != 0)
     {
@@ -441,6 +440,42 @@ int main(int argc, char* argv[])
     // Accept connections until SIGINT or SIGTERM received
     while (!signal_caught && (retval != -1))
     {
+        // accept connection
+        socklen_t client_addr_size = sizeof(client_addr);
+        client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_size);
+        if (client_fd != -1)
+        {
+            // log message to syslog when client connects
+            char ip_addr[INET6_ADDRSTRLEN];
+            inet_ntop(client_addr.ss_family,
+                    get_in_addr((struct sockaddr *)&client_addr),
+                    ip_addr, sizeof(ip_addr));
+
+            syslog(LOG_USER, "Accepted connection from %s", ip_addr);
+
+            // Now that we've accepted connection, declare/init/insert element at head
+            // instantiate thread
+            struct thread_data_s *thread_struct = (struct thread_data_s *) malloc(sizeof(struct thread_data_s));
+            if (!thread_struct)
+            {
+                syslog(LOG_ERR, "Malloc failure");
+                retval = -1;
+                continue;
+            }
+            thread_struct->client_fd = client_fd;
+            thread_struct->thread_complete = false;        
+            int id = pthread_create(&thread, NULL, thread_func, thread_struct);        
+            if (id != 0)
+            {
+                syslog(LOG_ERR, "Error creating new thread");
+                free(thread_struct);
+                retval = -1;
+                continue;
+            }
+            thread_struct->thread_id = thread;
+            SLIST_INSERT_HEAD(&head, thread_struct, entries);
+        }        
+
         if (timer_fired)
         {
             if (print_timestamp() != 0)
@@ -450,50 +485,14 @@ int main(int argc, char* argv[])
             }
             timer_fired = false;
         }
-        
-        // accept connection
-        socklen_t client_addr_size = sizeof(client_addr);
-        client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_size);
-        if (client_fd == -1)
-        {
-            syslog(LOG_ERR, "Issue accepting connection");
-            continue;
-        }
-
-        // log message to syslog when client connects
-        char ip_addr[INET6_ADDRSTRLEN];
-        inet_ntop(client_addr.ss_family,
-                  get_in_addr((struct sockaddr *)&client_addr),
-                  ip_addr, sizeof(ip_addr));
-
-        syslog(LOG_USER, "Accepted connection from %s", ip_addr);
-
-        // Now that we've accepted connection, declare/init/insert element at head
-        // instantiate thread
-        struct thread_data_s *thread_struct = (struct thread_data_s *) malloc(sizeof(struct thread_data_s));
-        if (!thread_struct)
-        {
-            syslog(LOG_ERR, "Malloc failure");
-            retval = -1;
-            continue;
-        }
-        thread_struct->client_fd = client_fd;
-        thread_struct->thread_complete = false;        
-        int id = pthread_create(&thread, NULL, thread_func, thread_struct);        
-        if (id != 0)
-        {
-            syslog(LOG_ERR, "Error creating new thread");
-            free(thread_struct);
-            retval = -1;
-            continue;
-        }
-        thread_struct->thread_id = thread;
-        SLIST_INSERT_HEAD(&head, thread_struct, entries);
 
         // iterate over linked list, remove from list if flag is set
         // also call pthread join 
-        /*struct thread_data_s *thread_ptr = NULL;
-        struct thread_data_s *next_thread = NULL
+        // Following code segments were based off of examples provided at:
+        // https://github.com/stockrt/queue.h/blob/master/sample.c
+        // https://man.freebsd.org/cgi/man.cgi?query=SLIST_HEAD&sektion=3&manpath=FreeBSD%2010.2-RELEASE
+        struct thread_data_s *thread_ptr = NULL;
+        struct thread_data_s *next_thread = NULL;
         SLIST_FOREACH_SAFE(thread_ptr, &head, entries, next_thread)
         {
             if (thread_ptr->thread_complete)
@@ -508,7 +507,7 @@ int main(int argc, char* argv[])
                 SLIST_REMOVE(&head, thread_ptr, thread_data_s, entries);
                 free(thread_ptr);
             }
-        }*/
+        }
     }
 
     syslog(LOG_USER, "Caught signal, exiting");
@@ -521,6 +520,8 @@ int main(int argc, char* argv[])
         SLIST_REMOVE_HEAD(&head, entries);
         free(thread_rm);
     }
+
+    timer_delete(timer_id);
 
     syslog(LOG_INFO, "Closing aesdsocket application");
     pthread_mutex_destroy(&log_mutex);
