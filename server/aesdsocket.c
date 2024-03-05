@@ -1,6 +1,11 @@
-/* CU AESD Assignment 5
+/* CU AESD Assignment 6
    Katie Biggs
-   February 18, 2024   */
+   March 2, 2024   */
+
+#include "queue.h"
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,23 +20,41 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 
 const char * LOG_FILE = "/var/tmp/aesdsocketdata";
 const char * PORT = "9000";
+const int buf_size = 512;
+const int timer_dur_s = 10;
 
 int sock_fd = -1;
+bool timer_fired = false;
+bool signal_caught = false;
+timer_t timer_id;
 
+typedef struct thread_data_t thread_data_t;
+struct thread_data_s {
+    bool        thread_complete;
+    int         client_fd;
+    pthread_t   thread_id;
+    SLIST_ENTRY(thread_data_s) entries;
+};
+
+pthread_mutex_t log_mutex;
+
+/* Signal handler for program terminating signals */
 static void signal_handler(int sig_num)
 {
-    syslog(LOG_USER, "Caught signal, exiting");
-    closelog();
-    close(sock_fd);
+    signal_caught = true;
     shutdown(sock_fd, SHUT_RDWR);
-    remove(LOG_FILE);
-    exit(EXIT_SUCCESS);
 }
 
+/* Timer signal handler */
+static void timer_handler(int sig, siginfo_t *si, void *uc)
+{
+    timer_fired = true;
+}
+
+/* Register for all necessary signals */
 int register_signals(void)
 {
     int retval = 0;
@@ -51,6 +74,107 @@ int register_signals(void)
     return retval;
 }
 
+/* Initialize the timer.
+   This functionality was based off of example provided at
+   https://man7.org/linux/man-pages/man2/timer_create.2.html */
+int init_timer(void)
+{
+    int retval = 0;
+    sigset_t mask;
+    struct sigaction sa;
+    struct sigevent  sev;
+    struct itimerspec its;
+
+    // Setup timer handler
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGRTMIN, &sa, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    // Temporarily disable all signals while initializing timer
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGRTMIN);
+    if (sigprocmask(SIG_SETMASK, &mask, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    // Create timer
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGRTMIN;
+    sev.sigev_value.sival_ptr = &timer_id;
+    if (timer_create(CLOCK_REALTIME, &sev, &timer_id) != 0)
+    {
+        retval = -1;
+    }
+
+    // Start time
+    its.it_value.tv_sec = timer_dur_s;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+    if (timer_settime(timer_id, 0, &its, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    if (sigprocmask(SIG_UNBLOCK, &mask, NULL) != 0)
+    {
+        retval = -1;
+    }
+
+    return retval;
+}
+
+/* Handle printing the timestamp.
+   This functionality was based off of example provided at 
+   https://man7.org/linux/man-pages/man3/strftime.3.html */
+int print_timestamp(void)
+{
+    int retval = 0;
+    char buf[200] = {0};
+
+    time_t t = time(NULL);
+    struct tm *tmp = localtime(&t);
+    if (tmp == NULL)
+    {
+        syslog(LOG_ERR, "Error getting localtime");
+        retval = -1;
+    }
+
+    // Write timestamp:time with newline
+    // year, month, day, hour (24 hr), minute, second
+    if (strftime(buf, sizeof(buf), "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp) == 0)
+    {
+        syslog(LOG_ERR, "Strftime returned 0");
+        retval = -1;
+    }
+    //printf("%s\n", buf);
+    
+    if (pthread_mutex_lock(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error locking mutex during timer call");
+        retval = -1;
+    }
+    else
+    {
+        FILE *fp = fopen(LOG_FILE, "a+");     
+        fputs(buf, fp);
+        fclose(fp);
+        if (pthread_mutex_unlock(&log_mutex) != 0)
+        {
+            syslog(LOG_ERR, "Error unlocking thread");
+            retval = -1;
+        }
+    }
+
+    return retval;
+}
+
 // Below function to get address info was utilized from the BGNet guide
 // https://github.com/thlorenz/beejs-guide-to-network-samples/blob/master/lib/get_in_addr.c
 void *get_in_addr(struct sockaddr *sa)
@@ -60,13 +184,131 @@ void *get_in_addr(struct sockaddr *sa)
     : (void *) &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+// Thread function (move receive/send here, set complete flag)
+// mutex lock/unlock around writing to /var/tmp/aesdsocketdata
+// exit when connection closed or error during send/receive
+int handle_client(struct thread_data_s* thread_func_args)
+{
+    int retval = 0;
+    int client_fd = thread_func_args->client_fd;
+    FILE *fp;
+    char buf[512] = {0};
+    int  bytes_recv, total_bytes_recv = 0;
+    bool more_bytes_to_read = true;
+
+    // Create a buffer to store the final packet
+    char *final_buffer = malloc(1);
+    if (!final_buffer)
+    {
+        syslog(LOG_ERR, "Malloc failure");
+        retval = -1;
+    }
+    *final_buffer = '\0';
+
+    // Receive all available bytes from the client
+    while (more_bytes_to_read && !(retval == -1))
+    {
+        bytes_recv = recv(client_fd, buf, 512, 0);
+        syslog(LOG_INFO, "Received %d bytes", bytes_recv);
+        if (bytes_recv == -1)
+        {
+            syslog(LOG_ERR, "Error receiving data");
+            more_bytes_to_read = false;
+            retval = -1;
+        }
+        else if (bytes_recv == 0)
+        {
+            more_bytes_to_read = false;
+        }
+        else
+        {
+            // Calculate the new buffer size needed to store packet and realloc
+            int new_buf_len = strlen(final_buffer) + strlen(buf) + 1;
+            char *tmp_buf = realloc(final_buffer, new_buf_len);
+            if (!tmp_buf)
+            {
+                syslog(LOG_ERR, "Realloc failure");
+                retval = -1;
+                continue;
+            }
+
+            // Move contents of most recent recv into final buffer
+            final_buffer = tmp_buf;
+            total_bytes_recv += bytes_recv;
+            strcpy(final_buffer, buf);
+
+            // Check to see if we've gotten new line and are finished receiving
+            char * new_line_found = memchr(final_buffer, '\n', 512);
+            if (new_line_found != NULL)
+            {
+                more_bytes_to_read = false;
+            }
+        }
+    }
+
+    // Open file and write the new packet contents
+    if (pthread_mutex_lock(&log_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Error locking mutex for file write");
+        retval = -1;
+    }
+    else
+    {
+        fp = fopen(LOG_FILE, "a+");
+        fwrite(final_buffer, total_bytes_recv, 1, fp);
+        syslog(LOG_INFO, "Completed file write");
+        fclose(fp);
+        pthread_mutex_unlock(&log_mutex);
+    }
+    free(final_buffer);
+
+    // Once write completes, return full content of /var/tmp/aesdsocketdata to client
+    char read_buf[512] = {0};
+    int  bytes_read;
+    fp = fopen(LOG_FILE, "r+");
+    while (!feof(fp))
+    {
+        bytes_read = fread(read_buf, 1, 512, fp);
+        char *msg_to_send = read_buf;
+        int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
+        if (bytes_sent == -1)
+        {
+            syslog(LOG_ERR, "Error sending bytes");
+            retval = -1;
+        }
+        syslog(LOG_INFO, "Read %d bytes, sent %d bytes", bytes_read, bytes_sent);
+    }
+    fclose(fp);
+
+    // Log message to syslog when connection closes
+    if (close(client_fd) != 0)
+    {
+        syslog(LOG_ERR, "Error closing client socket");
+        retval = -1;
+    }
+    else
+    {
+        syslog(LOG_USER, "Closed connection from client");
+    }
+
+    return retval;
+}
+
+void* thread_func(void* thread_params)
+{
+    struct thread_data_s* thread_func_args = (struct thread_data_s *) thread_params;
+    handle_client(thread_func_args);
+    thread_func_args->thread_complete = true;
+    return thread_params;
+}
+
 int main(int argc, char* argv[])
 {
     int    retval = 0, client_fd;
-    FILE   *fp;
     struct addrinfo hints, *serv_info, *p;
     struct sockaddr_storage client_addr;
-
+    pthread_t thread;
+    
     // Check for daemon
     bool run_daemon = false;
     if (argc > 1 && (strcmp(argv[1], "-d") == 0))
@@ -75,10 +317,24 @@ int main(int argc, char* argv[])
     }
 
     // Register for signals
-    retval = register_signals();
+    if (register_signals() != 0)
+    {
+        exit(EXIT_FAILURE);
+    }
 
     // Open syslog
     openlog("AESD Socket", 0, LOG_USER);
+
+    // Initialize mutex
+    if (pthread_mutex_init(&log_mutex, NULL) != 0)
+    {
+        syslog(LOG_ERR, "Error initializing mutex");
+        retval = -1;
+    }
+
+    // Initialize SLIST
+    SLIST_HEAD(slist_head, thread_data_s) head;
+    SLIST_INIT(&head);
 
     // open stream socket with port 9000
     memset(&hints, 0, sizeof(hints));
@@ -156,10 +412,24 @@ int main(int argc, char* argv[])
 
         // Redirect stdin/out/err to /dev/null
         open("/dev/null", O_RDWR);
-        dup(0);
-        dup(0);
+        if (dup(0) == -1)
+        {
+            close(sock_fd);
+            exit(EXIT_FAILURE);
+        }
+        if (dup(0) == -1)
+        {
+            close(sock_fd);
+            exit(EXIT_FAILURE);
+        }
     }
 
+    // Initialize timer - needs to be called after fork
+    if (init_timer() != 0)
+    {
+        retval = -1;
+    }
+    
     // listen for connection
     if (listen(sock_fd, 5) != 0)
     {
@@ -168,98 +438,95 @@ int main(int argc, char* argv[])
     }
     
     // Accept connections until SIGINT or SIGTERM received
-    while (retval != -1)
+    while (!signal_caught && (retval != -1))
     {
         // accept connection
         socklen_t client_addr_size = sizeof(client_addr);
         client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_size);
-        if (client_fd == -1)
+        if (client_fd != -1)
         {
-            syslog(LOG_ERR, "Issue accepting connection");
-            continue;
-        }
+            // log message to syslog when client connects
+            char ip_addr[INET6_ADDRSTRLEN];
+            inet_ntop(client_addr.ss_family,
+                    get_in_addr((struct sockaddr *)&client_addr),
+                    ip_addr, sizeof(ip_addr));
 
-        // log message to syslog when client connects
-        char ip_addr[INET6_ADDRSTRLEN];
-        inet_ntop(client_addr.ss_family,
-                  get_in_addr((struct sockaddr *)&client_addr),
-                  ip_addr, sizeof(ip_addr));
+            syslog(LOG_USER, "Accepted connection from %s", ip_addr);
 
-        syslog(LOG_USER, "Accepted connection from %s", ip_addr);
-
-        // Create /var/tmp/aesdsocketdata & append data received
-        char buf[256] = {0};
-        int  bytes_recv;
-        bool more_bytes_to_read = true;
-        fp = fopen(LOG_FILE, "a+");
-        while (more_bytes_to_read)
-        {
-            // Receive data over connection
-            bytes_recv = recv(client_fd, buf, 256, 0);
-            if (bytes_recv == -1)
+            // Now that we've accepted connection, declare/init/insert element at head
+            // instantiate thread
+            struct thread_data_s *thread_struct = (struct thread_data_s *) malloc(sizeof(struct thread_data_s));
+            if (!thread_struct)
             {
-                syslog(LOG_ERR, "Error receiving data");
-                more_bytes_to_read = false;
+                syslog(LOG_ERR, "Malloc failure");
                 retval = -1;
                 continue;
             }
-            else if (bytes_recv == 0)
+            thread_struct->client_fd = client_fd;
+            thread_struct->thread_complete = false;        
+            int id = pthread_create(&thread, NULL, thread_func, thread_struct);        
+            if (id != 0)
             {
-                more_bytes_to_read = false;
-            }
-            
-            syslog(LOG_INFO, "Received %d bytes", bytes_recv);
-
-            // Each packet is complete when newline character is received
-            char * new_line_found = memchr(buf, '\n', 256);
-            if (new_line_found != NULL)
-            {
-                more_bytes_to_read = false;
-            }
-
-            fwrite(buf, bytes_recv, 1, fp);
-            syslog(LOG_INFO, "Completed file write");
-        }
-
-        fclose(fp);
-
-        // Once received data packet completes, return full content of /var/tmp/aesdsocketdata to client
-        char read_buf[256] = {0};
-        int  bytes_read;
-        fp = fopen(LOG_FILE, "r+");
-        while (!feof(fp))
-        {
-            bytes_read = fread(read_buf, 1, 256, fp);
-            char *msg_to_send = read_buf;
-            int bytes_sent = send(client_fd, msg_to_send, bytes_read, 0);
-            if (bytes_sent == -1)
-            {
-                syslog(LOG_ERR, "Error sending bytes");
+                syslog(LOG_ERR, "Error creating new thread");
+                free(thread_struct);
                 retval = -1;
+                continue;
             }
-            syslog(LOG_INFO, "Read %d bytes, sent %d bytes", bytes_read, bytes_sent);
-        }
-        fclose(fp);
-
-        // Log message to syslog when connection closes
-        if (close(client_fd) != 0)
-        {
-            syslog(LOG_ERR, "Error closing client socket %s", ip_addr);
-            retval = -1;
-        }
-        else
-        {
-            syslog(LOG_USER, "Closed connection from %s", ip_addr);
+            thread_struct->thread_id = thread;
+            SLIST_INSERT_HEAD(&head, thread_struct, entries);
         }        
+
+        if (timer_fired)
+        {
+            if (print_timestamp() != 0)
+            {
+                retval = -1;
+                continue;
+            }
+            timer_fired = false;
+        }
+
+        // iterate over linked list, remove from list if flag is set
+        // also call pthread join 
+        // Following code segments were based off of examples provided at:
+        // https://github.com/stockrt/queue.h/blob/master/sample.c
+        // https://man.freebsd.org/cgi/man.cgi?query=SLIST_HEAD&sektion=3&manpath=FreeBSD%2010.2-RELEASE
+        struct thread_data_s *thread_ptr = NULL;
+        struct thread_data_s *next_thread = NULL;
+        SLIST_FOREACH_SAFE(thread_ptr, &head, entries, next_thread)
+        {
+            if (thread_ptr->thread_complete)
+            {
+                syslog(LOG_INFO, "Thread complete, joining");
+                int id = pthread_join(thread_ptr->thread_id, NULL);
+                if (id != 0)
+                {
+                    syslog(LOG_ERR, "Failure joining thread");
+                    retval = -1;
+                }
+                SLIST_REMOVE(&head, thread_ptr, thread_data_s, entries);
+                free(thread_ptr);
+            }
+        }
     }
+
+    syslog(LOG_USER, "Caught signal, exiting");
     
-    // When SIGINT or SIGTERM received,
-    // complete open connection operations, close open sockets, delete /var/tmp/aesdsocketdata
-    // Log message to syslog "Caught signal, exiting"    
+    // Request exit from each thread and wait for complete
+    while (!SLIST_EMPTY(&head))
+    {
+        struct thread_data_s *thread_rm = SLIST_FIRST(&head);
+        pthread_join(thread_rm->thread_id, NULL);
+        SLIST_REMOVE_HEAD(&head, entries);
+        free(thread_rm);
+    }
+
+    timer_delete(timer_id);
+
     syslog(LOG_INFO, "Closing aesdsocket application");
+    pthread_mutex_destroy(&log_mutex);
     closelog();
     close(sock_fd);
-    shutdown(sock_fd, SHUT_RDWR);
     remove(LOG_FILE);
 
     return retval;
