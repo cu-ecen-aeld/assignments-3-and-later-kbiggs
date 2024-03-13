@@ -44,9 +44,26 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 {
     ssize_t retval = 0;
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle read
-     */
+    
+    // check for filp and buf being valid
+
+    // use filp private_data to get aesd_dev
+
+    // lock mutex
+
+    // start read at fpos
+
+    // can return a single write command/circular buffer entry
+
+    // need to copy_to_user to fill buffer
+
+    // and then update after read
+
+    // return number of bytes read (up to first "count" bytes)
+    // if at end of file, return 0
+
+    // unlock mutex
+
     return retval;
 }
 
@@ -55,9 +72,29 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 {
     ssize_t retval = -ENOMEM;
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle write
-     */
+
+    // check for filp and buff being valid
+
+    // allocate (and realloc) memory as each write command is receive
+    // use kmalloc
+
+    // use filp private_data to get aesd_dev
+
+    // lock mutex
+
+    // copy buffer from user space
+    
+    // append to command being written until there's a newline
+
+    // add into circular buffer
+
+    // more than 10 writes should free the oldest
+
+    // unlock mutex
+
+    // return number of bytes written
+    // if nothing written, return 0
+
     return retval;
 }
 struct file_operations aesd_fops = {
@@ -117,8 +154,6 @@ void aesd_cleanup_module(void)
 
     /* cleanup AESD specific poritions here as necessary */
 
-    unregister_chrdev_region(devno, 1);
-
     int idx = 0;
     struct aesd_buffer_entry *entry = NULL;
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, idx)
@@ -127,6 +162,8 @@ void aesd_cleanup_module(void)
     }
 
     mutex_destroy(&aesd_device.dev_mutex);
+
+    unregister_chrdev_region(devno, 1);
 }
 
 module_init(aesd_init_module);
