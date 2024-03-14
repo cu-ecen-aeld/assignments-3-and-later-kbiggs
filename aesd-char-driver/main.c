@@ -117,31 +117,111 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-    ssize_t retval = -ENOMEM;
+    ssize_t retval = 0;
+    ssize_t bytes_to_write = 0;
+    struct aesd_dev *aesd_dev = NULL;
+    char *write_buf = NULL;
+
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
 
     // check for filp and buff being valid
+    if (!filp || !buf)
+    {
+        return -EINVAL;
+    }
 
     // allocate (and realloc) memory as each write command is receive
     // use kmalloc
+    write_buf = kmalloc(count, GFP_KERNEL);
+    if (!write_buf)
+    {
+        PDEBUG("Unable to allocate memory for write");
+        return -ENOMEM;
+    }
 
     // use filp private_data to get aesd_dev
+    aesd_dev = filp->private_data;
+
+    if (!aesd_dev)
+    {
+        PDEBUG("Unable to use private data");
+        return -EPERM;
+    }
 
     // lock mutex
+    if (mutex_lock_interruptible(&aesd_dev->dev_mutex))
+    {
+        PDEBUG("Unable to lock mutex for read");
+        kfree(write_buf);
+        return -ERESTARTSYS;
+    }
 
     // copy buffer from user space
+    if (copy_from_user(write_buf, buf, count))
+    {
+        PDEBUG("Unable to copy buffer to kernel for writing");
+        mutex_unlock(&aesd_dev->dev_mutex);
+        kfree(write_buf);
+        return -EFAULT;
+    }
     
+    // check to see if we've found a newline yet
+    char * new_line_found = memchr(write_buf, '\n', count);
+
+    if (new_line_found)
+    {
+        bytes_to_write = 1 + (new_line_found - write_buf);
+    }
+    else
+    {
+        bytes_to_write = count;
+    }
+
     // append to command being written until there's a newline
+    aesd_dev->working_entry.buffptr = krealloc(aesd_dev->working_entry.buffptr,
+                                               aesd_dev->working_entry.size+bytes_to_write,
+                                               GFP_KERNEL);
+    if (!aesd_dev->working_entry.buffptr)
+    {
+        PDEBUG("Unable to reallocate for the new write command addition");
+        mutex_unlock(&aesd_dev->dev_mutex);
+        kfree(write_buf);
+        return -ENOMEM;
+    }
 
-    // add into circular buffer
+    // copy the most recent write buffer into working entry
+    memcpy(aesd_dev->working_entry.buffptr+aesd_dev->working_entry.size,
+           write_buf, bytes_to_write);
 
-    // more than 10 writes should free the oldest
-    // if the add entry has returned non-null, free
+    aesd_dev->working_entry.size += bytes_to_write;
+
+    // add into circular buffer once full packet is received    
+    if (new_line_found)
+    {
+        struct aesd_buffer_entry new_entry = {0};
+        const char *ret_buf = NULL;
+        new_entry.buffptr = aesd_dev->working_entry.buffptr;
+        new_entry.size    = aesd_dev->working_entry.size;
+
+        // more than 10 writes should free the oldest
+        // if the add entry has returned non-null, free
+        ret_buf = aesd_circular_buffer_add_entry(&aesd_dev->buffer, &new_entry);
+        if (ret_buf)
+        {
+            kfree(ret_buf);
+        }
+
+        aesd_dev->working_entry.size = 0;
+        aesd_dev->working_entry.buffptr = NULL;
+    }    
 
     // unlock mutex
+    mutex_unlock(&aesd_dev->dev_mutex);
+    kfree(write_buf);
 
     // return number of bytes written
     // if nothing written, return 0
+    retval = count;
 
     return retval;
 }
@@ -201,6 +281,7 @@ void aesd_cleanup_module(void)
     cdev_del(&aesd_device.cdev);
 
     /* cleanup AESD specific poritions here as necessary */
+    aesd_device.working_entry.buffptr = NULL;
 
     int idx = 0;
     struct aesd_buffer_entry *entry = NULL;
