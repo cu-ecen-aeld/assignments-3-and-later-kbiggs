@@ -34,10 +34,7 @@ struct aesd_dev
     struct aesd_circular_buffer buffer;
 
     /* Working buffer entry */
-    char *working_buff;
-
-    /* Working buffer entry size */
-    size_t working_buff_size;
+    struct aesd_buffer_entry working_entry;
 
     /* Char device structure */
     struct cdev cdev;
