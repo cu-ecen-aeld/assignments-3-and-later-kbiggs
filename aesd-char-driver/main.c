@@ -43,8 +43,8 @@ int aesd_release(struct inode *inode, struct file *filp)
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-    ssize_t retval = 0;
     ssize_t ret_offset = 0;
+    ssize_t bytes_to_read_out = 0;
     struct aesd_buffer_entry *ret_entry = NULL;
     struct aesd_dev *aesd_dev = NULL;
 
@@ -65,15 +65,15 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         return -EPERM;
     }
 
-    // lock mutex
-    if (mutex_lock_interruptible(&aesd_dev->dev_mutex))
+    // lock mutex before reading from circular buffer
+    if (mutex_lock_interruptible(&aesd_dev->buf_mutex))
     {
         PDEBUG("Unable to lock mutex for read");
         return -ERESTARTSYS;
     }
 
     // start read at fpos
-    // ret_offset gets the location within the returned entry
+    // ret_offset gets the location within a single entry (the returned entry) corresponding to f_pos
     ret_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_dev->buffer, *f_pos, &ret_offset);
 
     // if entry is still null, then we weren't able to read anything at f_pos
@@ -81,37 +81,37 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     if (!ret_entry)
     {
         PDEBUG("Nothing left to read");
-        mutex_unlock(&aesd_dev->dev_mutex);
-        return 0;
+        mutex_unlock(&aesd_dev->buf_mutex);
+        return bytes_to_read_out;
     }
     
-    // can return a single write command/circular buffer entry
     // determine how many bytes are left to read in this individual entry
     ssize_t bytes_left_in_entry = ret_entry->size - ret_offset;
 
     // ensure we aren't writing out more bytes than allowed by count param
     if (bytes_left_in_entry > count)
     {
-        bytes_left_in_entry = count;
+        bytes_to_read_out = count;
+    }
+    else
+    {
+        bytes_to_read_out = bytes_left_in_entry;
     }
     
     // use copy_to_user to fill buffer with what we have read so far and return back to user
-    if (copy_to_user(buf, ret_entry->buffptr+ret_offset, bytes_left_in_entry))
+    if (copy_to_user(buf, ret_entry->buffptr+ret_offset, bytes_to_read_out))
     {
         PDEBUG("Unable to copy buffer contents back to user");
-        mutex_unlock(&aesd_dev->dev_mutex);
+        mutex_unlock(&aesd_dev->buf_mutex);
         return -EFAULT;
     }
 
     // move f_pos forward according to the number of bytes we've read
-    *f_pos = *f_pos + bytes_left_in_entry;
+    *f_pos = *f_pos + bytes_to_read_out;
 
-    // return number of bytes read
-    retval =  bytes_left_in_entry;   
-
-    // unlock mutex
-    mutex_unlock(&aesd_dev->dev_mutex);
-    return retval;
+    // unlock mutex & return the number of bytes read out
+    mutex_unlock(&aesd_dev->buf_mutex);
+    return bytes_to_read_out;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
@@ -130,8 +130,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EINVAL;
     }
 
-    // allocate (and realloc) memory as each write command is receive
-    // use kmalloc
+    // allocate memory as each write command is received
+    // use kmalloc and check for errors with alloc being too big
     write_buf = kmalloc(count, GFP_KERNEL);
     if (!write_buf)
     {
@@ -148,24 +148,15 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EPERM;
     }
 
-    // lock mutex
-    if (mutex_lock_interruptible(&aesd_dev->dev_mutex))
-    {
-        PDEBUG("Unable to lock mutex for read");
-        kfree(write_buf);
-        return -ERESTARTSYS;
-    }
-
-    // copy buffer from user space
+    // copy buffer from user space into kernel buffer
     if (copy_from_user(write_buf, buf, count))
     {
         PDEBUG("Unable to copy buffer to kernel for writing");
-        mutex_unlock(&aesd_dev->dev_mutex);
         kfree(write_buf);
         return -EFAULT;
     }
     
-    // check to see if we've found a newline yet
+    // check to see if there's a newline in the input
     char * new_line_found = memchr(write_buf, '\n', count);
 
     if (new_line_found)
@@ -175,21 +166,30 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     else
     {
         bytes_to_write = count;
+    }    
+
+    // lock mutex before writing to circular buffer
+    if (mutex_lock_interruptible(&aesd_dev->buf_mutex))
+    {
+        PDEBUG("Unable to lock mutex for read");
+        kfree(write_buf);
+        return -ERESTARTSYS;
     }
 
-    // append to command being written until there's a newline
+    // realloc working entry so that we can store the new contents to write
     aesd_dev->working_entry.buffptr = krealloc(aesd_dev->working_entry.buffptr,
                                                aesd_dev->working_entry.size+bytes_to_write,
                                                GFP_KERNEL);
     if (!aesd_dev->working_entry.buffptr)
     {
         PDEBUG("Unable to reallocate for the new write command addition");
-        mutex_unlock(&aesd_dev->dev_mutex);
+        mutex_unlock(&aesd_dev->buf_mutex);
         kfree(write_buf);
         return -ENOMEM;
     }
 
     // copy the most recent write buffer into working entry
+    // use the working_entry.size so that we start copying at the end of the entry
     memcpy(aesd_dev->working_entry.buffptr+aesd_dev->working_entry.size,
            write_buf, bytes_to_write);
 
@@ -216,7 +216,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }    
 
     // unlock mutex
-    mutex_unlock(&aesd_dev->dev_mutex);
+    mutex_unlock(&aesd_dev->buf_mutex);
     kfree(write_buf);
 
     // return number of bytes written
@@ -261,17 +261,20 @@ int aesd_init_module(void)
     memset(&aesd_device,0,sizeof(struct aesd_dev));
 
     /* initialize the AESD specific portion of the device */
-    mutex_init(&aesd_device.dev_mutex);
+
+    // init mutex and circular buffer so they are ready/available when driver is loaded
+    mutex_init(&aesd_device.buf_mutex);
 
     aesd_circular_buffer_init(&aesd_device.buffer);
 
     result = aesd_setup_cdev(&aesd_device);
 
-    if( result ) {
+    if (result)
+    {
         unregister_chrdev_region(dev, 1);
     }
-    return result;
 
+    return result;
 }
 
 void aesd_cleanup_module(void)
@@ -290,7 +293,7 @@ void aesd_cleanup_module(void)
        kfree(entry->buffptr);
     }
 
-    mutex_destroy(&aesd_device.dev_mutex);
+    mutex_destroy(&aesd_device.buf_mutex);
 
     unregister_chrdev_region(devno, 1);
 }

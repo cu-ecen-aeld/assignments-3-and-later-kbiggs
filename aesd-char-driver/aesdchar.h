@@ -27,13 +27,13 @@
 
 struct aesd_dev
 {
-     /* Mutex for locking during driver operations */
-    struct mutex dev_mutex;
+     /* Mutex for locking circular buffer during driver operations */
+    struct mutex buf_mutex;
 
-    /* Circular buffer */
+    /* Circular buffer to store contents of writes */
     struct aesd_circular_buffer buffer;
 
-    /* Working buffer entry */
+    /* Working buffer entry to use during write operations */
     struct aesd_buffer_entry working_entry;
 
     /* Char device structure */
