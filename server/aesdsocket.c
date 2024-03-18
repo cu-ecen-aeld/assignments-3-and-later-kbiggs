@@ -21,7 +21,14 @@
 #include <stdbool.h>
 #include <arpa/inet.h>
 
-const char * LOG_FILE = "/var/tmp/aesdsocketdata";
+#define USE_AESD_CHAR_DEVICE 1
+
+#ifdef USE_AESD_CHAR_DEVICE
+    const char * LOG_FILE = "/dev/aesdchar";
+#else
+    const char * LOG_FILE = "/var/tmp/aesdsocketdata";
+#endif
+
 const char * PORT = "9000";
 const int buf_size = 512;
 const int timer_dur_s = 10;
@@ -424,11 +431,13 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Initialize timer - needs to be called after fork
-    if (init_timer() != 0)
-    {
-        retval = -1;
-    }
+    #ifndef USE_AESD_CHAR_DEVICE
+        // Initialize timer - needs to be called after fork
+        if (init_timer() != 0)
+        {
+            retval = -1;
+        }
+    #endif
     
     // listen for connection
     if (listen(sock_fd, 5) != 0)
@@ -476,15 +485,17 @@ int main(int argc, char* argv[])
             SLIST_INSERT_HEAD(&head, thread_struct, entries);
         }        
 
-        if (timer_fired)
-        {
-            if (print_timestamp() != 0)
+        #ifndef USE_AESD_CHAR_DEVICE
+            if (timer_fired)
             {
-                retval = -1;
-                continue;
+                if (print_timestamp() != 0)
+                {
+                    retval = -1;
+                    continue;
+                }
+                timer_fired = false;
             }
-            timer_fired = false;
-        }
+        #endif
 
         // iterate over linked list, remove from list if flag is set
         // also call pthread join 
@@ -521,13 +532,15 @@ int main(int argc, char* argv[])
         free(thread_rm);
     }
 
-    timer_delete(timer_id);
+    #ifndef USE_AESD_CHAR_DEVICE
+        timer_delete(timer_id);
+        remove(LOG_FILE);
+    #endif
 
     syslog(LOG_INFO, "Closing aesdsocket application");
     pthread_mutex_destroy(&log_mutex);
     closelog();
     close(sock_fd);
-    remove(LOG_FILE);
 
     return retval;
 }
