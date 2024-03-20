@@ -20,6 +20,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
+#include "aesd_ioctl.h"
 
 #define USE_AESD_CHAR_DEVICE 1
 
