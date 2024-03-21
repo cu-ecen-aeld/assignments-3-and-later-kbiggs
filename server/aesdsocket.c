@@ -20,12 +20,14 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
-#include "aesd_ioctl.h"
+#include <sys/ioctl.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define USE_AESD_CHAR_DEVICE 1
 
 #ifdef USE_AESD_CHAR_DEVICE
     const char * LOG_FILE = "/dev/aesdchar";
+    const char * AESD_CHAR_IOCTL_CMD = "AESDCHAR_IOCSEEKTO:";
 #else
     const char * LOG_FILE = "/var/tmp/aesdsocketdata";
 #endif
@@ -203,6 +205,8 @@ int handle_client(struct thread_data_s* thread_func_args)
     char buf[512] = {0};
     int  bytes_recv, total_bytes_recv = 0;
     bool more_bytes_to_read = true;
+    char * new_line_found = NULL;
+    int ioctl_cmd_found = -1;
 
     // Create a buffer to store the final packet
     char *final_buffer = malloc(1);
@@ -212,6 +216,8 @@ int handle_client(struct thread_data_s* thread_func_args)
         retval = -1;
     }
     *final_buffer = '\0';
+
+    //fp = fopen(LOG_FILE, "a+");
 
     // Receive all available bytes from the client
     while (more_bytes_to_read && !(retval == -1))
@@ -246,11 +252,25 @@ int handle_client(struct thread_data_s* thread_func_args)
             strcpy(final_buffer, buf);
 
             // Check to see if we've gotten new line and are finished receiving
-            char * new_line_found = memchr(final_buffer, '\n', 512);
+            new_line_found = memchr(final_buffer, '\n', 512);
             if (new_line_found != NULL)
             {
                 more_bytes_to_read = false;
             }
+
+            #ifdef USE_AESD_CHAR_DEVICE
+            // Check to see if we've gotten the ioctl command
+            // Check to see if we've gotten the cmd itself (minus newline) and the other arguments
+            const size_t ioctl_cmd_len = 23;
+
+            ioctl_cmd_found = strncmp(final_buffer, AESD_CHAR_IOCTL_CMD, 19);
+            syslog(LOG_INFO, "IOCTL cmd length %lu, ioctl_cmd_found %d", ioctl_cmd_len, ioctl_cmd_found);
+            if ((total_bytes_recv >= ioctl_cmd_len) && (ioctl_cmd_found == 0))
+            {
+                syslog(LOG_INFO, "Received ioctl cmd");
+                more_bytes_to_read = false;
+            }
+            #endif
         }
     }
 
@@ -262,18 +282,39 @@ int handle_client(struct thread_data_s* thread_func_args)
     }
     else
     {
-        fp = fopen(LOG_FILE, "a+");
-        fwrite(final_buffer, total_bytes_recv, 1, fp);
-        syslog(LOG_INFO, "Completed file write");
-        fclose(fp);
-        pthread_mutex_unlock(&log_mutex);
+        if (ioctl_cmd_found == 0)
+        {
+            #ifdef USE_AESD_CHAR_DEVICE
+            struct aesd_seekto seekto;
+            syslog(LOG_INFO, "Performing ioctl");
+            // find the command portions from the input string
+            char * separator = memchr(final_buffer, ',', 23);
+            seekto.write_cmd = strtoul(final_buffer, &separator, 10);
+            seekto.write_cmd_offset = strtoul(separator+1, NULL, 10);
+            syslog(LOG_INFO, "Write cmd %u write cmd offset %u", seekto.write_cmd, seekto.write_cmd_offset);
+            fp = fopen(LOG_FILE, "a+");
+            ioctl(fileno(fp), AESDCHAR_IOCSEEKTO, &seekto);
+            #endif
+        }
+        else
+        {
+            fp = fopen(LOG_FILE, "a+");
+            fwrite(final_buffer, total_bytes_recv, 1, fp);
+            syslog(LOG_INFO, "Completed file write");
+            fclose(fp);
+            pthread_mutex_unlock(&log_mutex);
+        }        
     }
     free(final_buffer);
 
     // Once write completes, return full content of /var/tmp/aesdsocketdata to client
     char read_buf[512] = {0};
     int  bytes_read;
-    fp = fopen(LOG_FILE, "r+");
+    if (ioctl_cmd_found)
+    {
+        fp = fopen(LOG_FILE, "r+");
+    }
+    
     while (!feof(fp))
     {
         bytes_read = fread(read_buf, 1, 512, fp);
