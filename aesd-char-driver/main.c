@@ -324,8 +324,9 @@ long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
     // bounds check the number of commands and command length
     if ((seek_to.write_cmd > AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) ||
-        (seek_to.write_cmd_offset > aesd_dev->buffer.entry[seek_to.write_cmd].size))
+        (seek_to.write_cmd_offset >= aesd_dev->buffer.entry[seek_to.write_cmd].size))
     {
+        mutex_unlock(&aesd_dev->buf_mutex);
         return -EINVAL;
     }
 
@@ -338,8 +339,8 @@ long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     }
 
     mutex_unlock(&aesd_dev->buf_mutex);
-
     filp->f_pos = offset + seek_to.write_cmd_offset;
+    PDEBUG("updated fpos %lld",filp->f_pos);
 
     return 0;
 }
