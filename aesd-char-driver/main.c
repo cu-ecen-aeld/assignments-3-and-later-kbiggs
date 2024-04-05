@@ -19,6 +19,7 @@
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -219,16 +220,137 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     mutex_unlock(&aesd_dev->buf_mutex);
     kfree(write_buf);
 
+    // update fpos
+    *f_pos = *f_pos + count;
+
     // return number of bytes written
     // if nothing written, return 0
     retval = count;
 
     return retval;
 }
+
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+    loff_t retval = 0;
+    struct aesd_dev *aesd_dev = NULL;
+    
+    // check for filp being valid
+    if (!filp)
+    {
+        return -EINVAL;
+    }
+
+    // use filp private_data to get aesd_dev
+    aesd_dev = filp->private_data;
+
+    if (!aesd_dev)
+    {
+        PDEBUG("Unable to use private data");
+        return -EPERM;
+    }
+
+    // lock mutex before reading from circular buffer
+    if (mutex_lock_interruptible(&aesd_dev->buf_mutex))
+    {
+        PDEBUG("Unable to lock mutex for read");
+        return -ERESTARTSYS;
+    }
+
+    // calculate the size of all the buffer contents
+    loff_t buf_size = 0;
+
+    int idx = 0;
+    struct aesd_buffer_entry *entry = NULL;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_dev->buffer, idx)
+    {
+       buf_size += entry->size;
+    }
+
+    retval = fixed_size_llseek(filp, off, whence, buf_size);
+
+    if (retval < 0)
+    {
+        retval = -EINVAL;
+    }
+    else
+    {
+        filp->f_pos = retval;
+    }
+
+    // unlock mutex
+    mutex_unlock(&aesd_dev->buf_mutex);
+
+    return retval;
+}
+
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_dev *aesd_dev = NULL;
+    struct aesd_seekto seek_to;
+    
+    // check for filp being valid
+    if (!filp)
+    {
+        return -EINVAL;
+    }
+
+    // use filp private_data to get aesd_dev
+    aesd_dev = filp->private_data;
+
+    if (!aesd_dev)
+    {
+        PDEBUG("Unable to use private data");
+        return -EPERM;
+    }
+
+    // check for cmd being valid
+    if (cmd != AESDCHAR_IOCSEEKTO)
+    {
+        return -ENOTTY;
+    }
+
+    // copy from userspace
+    if (copy_from_user(&seek_to, (const void __user *)arg, sizeof(seek_to)))
+    {
+        return -EFAULT;
+    }
+
+    if (mutex_lock_interruptible(&aesd_dev->buf_mutex))
+    {
+        PDEBUG("Unable to lock mutex for read");
+        return -ERESTARTSYS;
+    }
+
+    // bounds check the number of commands and command length
+    if ((seek_to.write_cmd > AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) ||
+        (seek_to.write_cmd_offset >= aesd_dev->buffer.entry[seek_to.write_cmd].size))
+    {
+        mutex_unlock(&aesd_dev->buf_mutex);
+        return -EINVAL;
+    }
+
+    // update fpos (starting offset of the command + write cmd offset)
+    long offset = 0;
+    size_t buf_idx = 0;
+    for (buf_idx = 0; buf_idx < seek_to.write_cmd; buf_idx++)
+    {
+        offset += aesd_dev->buffer.entry[buf_idx].size;
+    }
+
+    mutex_unlock(&aesd_dev->buf_mutex);
+    filp->f_pos = offset + seek_to.write_cmd_offset;
+    PDEBUG("updated fpos %lld",filp->f_pos);
+
+    return 0;
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
+    .llseek =   aesd_llseek,
     .read =     aesd_read,
     .write =    aesd_write,
+    .unlocked_ioctl = aesd_ioctl,
     .open =     aesd_open,
     .release =  aesd_release,
 };
